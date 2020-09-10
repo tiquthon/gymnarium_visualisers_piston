@@ -1,0 +1,17 @@
+[package]
+name = "gymnarium_visualisers_piston"
+version = "0.1.0"
+
+description = "The visualisers crate for the gymnarium libraries utilizing the piston crates."
+keywords = ["gym", "reinforcement", "learning", "visualisation", "piston"]
+
+repository = "https://github.com/tiquthon/gymnarium_visualisers_piston"
+authors = ["Thimo Neumann <tiquthon@gmail.com>"]
+
+edition = "2018"
+license = "MIT"
+
+[dependencies]
+gymnarium_visualisers_base = { path = "../gymnarium_visualisers_base" }
+piston_window = "0.112.0"
+gfx_device_gl = "0.16.2"
