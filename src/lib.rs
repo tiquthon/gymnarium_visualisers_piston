@@ -27,7 +27,7 @@ use gfx_device_gl::Device;
 
 use gymnarium_visualisers_base::{
     TwoDimensionalVisualiser, TwoDimensionalDrawableEnvironment, Visualiser, Geometry2D, Viewport2D,
-    Position2D, Size2D, Viewport2DModification, Transformation2D
+    Position2D, Size2D, Viewport2DModification, Transformation2D, Color
 };
 
 /* --- --- --- PistonVisualiserError --- --- --- */
@@ -69,16 +69,18 @@ impl<DrawableEnvironmentError: Error> From<DrawableEnvironmentError> for Further
 
 /* --- --- --- PistonVisualiser --- --- --- */
 
+type PistonVisualiserSyncedData = (Vec<Geometry2D>, Option<(Viewport2D, Viewport2DModification)>, Option<Color>);
+
 pub struct PistonVisualiser {
     join_handle: Option<JoinHandle<()>>,
     close_requested: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 
     last_geometries_2d: Vec<Geometry2D>,
-    latest_geometries_2d: Arc<Mutex<Option<Vec<Geometry2D>>>>,
-
     last_preferred_view: Option<(Viewport2D, Viewport2DModification)>,
-    latest_preferred_view: Arc<Mutex<Option<(Viewport2D, Viewport2DModification)>>>,
+    last_preferred_background_color: Option<Color>,
+
+    latest_data: Arc<Mutex<Option<PistonVisualiserSyncedData>>>,
 }
 
 impl PistonVisualiser {
@@ -91,51 +93,43 @@ impl PistonVisualiser {
         let arc1_closed = Arc::new(AtomicBool::new(false));
         let arc2_closed = Arc::clone(&arc1_closed);
 
-        let geometries_2d = Vec::new();
-        let arc1_latest_geometries_2d = Arc::new(Mutex::new(Some(geometries_2d.clone())));
-        let arc2_latest_geometries_2d = Arc::clone(&arc1_latest_geometries_2d);
-
-        let arc1_latest_preferred_view = Arc::new(Mutex::new(None));
-        let arc2_latest_preferred_view = Arc::clone(&arc1_latest_preferred_view);
+        let arc1_latest_data = Arc::new(Mutex::new(Some( (Vec::new(), None, None) )));
+        let arc2_latest_data = Arc::clone(&arc1_latest_data);
 
         Self {
             join_handle: Some(thread::spawn(move || Self::thread_function(
                 window_title, window_dimension, arc1_close_requested, arc1_closed,
-                arc1_latest_geometries_2d, arc1_latest_preferred_view
+                arc1_latest_data
             ))),
             close_requested: arc2_close_requested,
             closed: arc2_closed,
-            last_geometries_2d: geometries_2d,
-            latest_geometries_2d: arc2_latest_geometries_2d,
+            last_geometries_2d: Vec::new(),
             last_preferred_view: None,
-            latest_preferred_view: arc2_latest_preferred_view,
+            last_preferred_background_color: None,
+            latest_data: arc2_latest_data,
         }
     }
 
     fn thread_function(
         window_title: String, window_dimension: (u32, u32), close_requested: Arc<AtomicBool>,
-        closed: Arc<AtomicBool>, latest_geometries_2d: Arc<Mutex<Option<Vec<Geometry2D>>>>,
-        latest_preferred_view: Arc<Mutex<Option<(Viewport2D, Viewport2DModification)>>>
+        closed: Arc<AtomicBool>, latest_data: Arc<Mutex<Option<PistonVisualiserSyncedData>>>
     ) {
         let mut window: PistonWindow = WindowSettings::new(window_title.as_str(), window_dimension)
             .exit_on_esc(true)
             .build()
             .expect("Failed to build PistonWindow!");
 
-        let mut geometry_2ds = latest_geometries_2d.lock()
-            .expect("Could not lock latest_geometries_2d!")
+        let (mut geometry_2ds, mut preferred_view, mut background_color) = latest_data.lock()
+            .expect("Could not lock latest_data!")
             .take()
             .unwrap_or_default();
-        let mut last_preferred_view = latest_preferred_view.lock()
-            .expect("Could not lock latest_preferred_view!")
-            .take();
 
         while let Some(event) = window.next() {
             match event {
                 Event::Loop(loop_args) => {
                     if let Loop::Render(_) = loop_args {
                         window.draw_2d(&event, |context, graphics, device| {
-                            Self::render(&context, graphics, device, &geometry_2ds, &last_preferred_view);
+                            Self::render(&context, graphics, device, &geometry_2ds, &preferred_view, &background_color);
                         });
                     }
                 },
@@ -146,15 +140,12 @@ impl PistonVisualiser {
             }
             if close_requested.load(std::sync::atomic::Ordering::Relaxed) {
                 window.set_should_close(true);
-            } else {
-                geometry_2ds = latest_geometries_2d.lock()
-                    .expect("Could not lock latest_geometries_2d inside while!")
-                    .take()
-                    .unwrap_or(geometry_2ds);
-                last_preferred_view = latest_preferred_view.lock()
-                    .expect("Could not lock latest_preferred_view inside while!")
-                    .take()
-                    .or(last_preferred_view);
+            } else if let Some((new_geometry_2ds, new_preferred_view, new_background_color)) = latest_data.lock()
+                .expect("Could not lock latest_data inside while!")
+                .take() {
+                geometry_2ds = new_geometry_2ds;
+                preferred_view = new_preferred_view;
+                background_color = new_background_color;
             }
         }
         closed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -166,8 +157,11 @@ impl PistonVisualiser {
         device: &mut Device,
         geometry_2ds: &[Geometry2D],
         preferred_view: &Option<(Viewport2D, Viewport2DModification)>,
+        background_color: &Option<Color>,
     ) {
-        piston_window::clear([1.0; 4], graphics);
+        if let Some(c) = background_color {
+            piston_window::clear(c.float_array(), graphics);
+        }
 
         let (draw_state, transform) = if let Some((viewport, viewport_mod)) = preferred_view {
             match viewport_mod {
@@ -443,7 +437,7 @@ impl PistonVisualiser {
 
     fn window_viewport() -> Viewport2D {
         Viewport2D::with(
-            Position2D::with(0f64, 0f64),
+            Position2D::zero(),
             Size2D::with(2f64, 2f64)
         )
     }
@@ -472,7 +466,13 @@ impl<DrawableEnvironmentError: Error> TwoDimensionalVisualiser<
         DrawableEnvironment: TwoDimensionalDrawableEnvironment<DrawableEnvironmentError>
     >(&mut self, drawable_environment: &DrawableEnvironment) -> Result<(), FurtherPistonVisualiserError<DrawableEnvironmentError>> {
 
-        let (pref_viewport, pref_viewport_mod) = drawable_environment.preferred_view()?;
+        let new_preferred_view = drawable_environment.preferred_view();
+
+        let pref_viewport = if let Some((pref_viewport, _)) = new_preferred_view {
+            pref_viewport
+        } else {
+            Viewport2D::with(Position2D::zero(), Size2D::with(2f64, 2f64))
+        };
 
         let new_geometries_2d = drawable_environment.draw_two_dimensional()?
             .into_iter()
@@ -481,21 +481,17 @@ impl<DrawableEnvironmentError: Error> TwoDimensionalVisualiser<
                 &Self::window_viewport(),
             ))
             .collect::<Vec<Geometry2D>>();
-        if new_geometries_2d != self.last_geometries_2d {
-            let mut locked_latest_geometries_2d = self.latest_geometries_2d.lock()
+
+        let new_background_color = drawable_environment.preferred_background_color();
+
+        if new_geometries_2d != self.last_geometries_2d || new_preferred_view != self.last_preferred_view || new_background_color != self.last_preferred_background_color {
+            let mut locked_latest_data = self.latest_data.lock()
                 .map_err(|e| FurtherPistonVisualiserError::LockingFailedInternally(format!("{}", e)))?;
-            (*locked_latest_geometries_2d) = Some(new_geometries_2d.clone());
+            (*locked_latest_data) = Some((new_geometries_2d.clone(), new_preferred_view, new_background_color));
             self.last_geometries_2d = new_geometries_2d;
-        }
-
-        let new_preferred_view = Some((pref_viewport, pref_viewport_mod));
-        if new_preferred_view != self.last_preferred_view {
-            let mut locked_latest_preferred_view = self.latest_preferred_view.lock()
-                .map_err(|e| FurtherPistonVisualiserError::LockingFailedInternally(format!("{}", e)))?;
-            (*locked_latest_preferred_view) = new_preferred_view;
             self.last_preferred_view = new_preferred_view;
+            self.last_preferred_background_color = new_background_color;
         }
-
         Ok(())
     }
 }
