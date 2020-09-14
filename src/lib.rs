@@ -2,6 +2,13 @@
 //!
 //! `gymnarium_visualisers_piston` contains visualisers and further structures for the
 //! `gymnarium_libraries` utilizing the Piston crates.
+//!
+//! ## Problems
+//!
+//! ### Non Convex Polygons
+//!
+//! This crate is not able to visualise non convex polygons, because I couldn't find something
+//! in the piston framework nor in crates.io and I didn't want to implement it myself.
 
 extern crate gymnarium_visualisers_base;
 extern crate piston_window;
@@ -18,7 +25,10 @@ use piston_window::{WindowSettings, PistonWindow, Event, Loop, Window, Context, 
 
 use gfx_device_gl::Device;
 
-use gymnarium_visualisers_base::{TwoDimensionalVisualiser, TwoDimensionalDrawableEnvironment, Visualiser, Geometry2D, Viewport2D, Position2D, Size2D, Viewport2DModification, Transformation2D};
+use gymnarium_visualisers_base::{
+    TwoDimensionalVisualiser, TwoDimensionalDrawableEnvironment, Visualiser, Geometry2D, Viewport2D,
+    Position2D, Size2D, Viewport2DModification, Transformation2D
+};
 
 /* --- --- --- PistonVisualiserError --- --- --- */
 
@@ -334,7 +344,7 @@ impl PistonVisualiser {
                     )
             },
             Geometry2D::Polygon { points, fill_color, border_color, border_width, transformations } => {
-                // TODO: Output warning
+                // Can draw only non-convex polygons.
                 let polygon: Vec<[f64; 2]> = points.iter()
                     .map(|position| [position.x, position.y])
                     .collect();
