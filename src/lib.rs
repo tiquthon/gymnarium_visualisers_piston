@@ -239,9 +239,13 @@ impl PistonVisualiser {
                         graphics,
                     );
             },
-            Geometry2D::Line { points, line_color, line_width, transformations } => {
+            Geometry2D::Line { points, line_color, line_width, line_shape, transformations } => {
                 piston_window::line::Line::new(line_color.float_array(), *line_width)
-                    .shape(piston_window::line::Shape::Round)
+                    .shape(match line_shape {
+                        gymnarium_visualisers_base::LineShape::Square => piston_window::line::Shape::Square,
+                        gymnarium_visualisers_base::LineShape::Round => piston_window::line::Shape::Round,
+                        gymnarium_visualisers_base::LineShape::Bevel => piston_window::line::Shape::Bevel,
+                    })
                     .draw_from_to(
                         [points[0].x, points[0].y],
                         [points[1].x, points[1].y],
@@ -253,11 +257,15 @@ impl PistonVisualiser {
                     );
             },
             Geometry2D::Polyline {
-                points, line_color, line_width, transformations
+                points, line_color, line_width, line_shape, transformations
             } => {
                 for index in 0..(points.len() - 1) {
                     piston_window::line::Line::new(line_color.float_array(), *line_width)
-                        .shape(piston_window::line::Shape::Round)
+                        .shape(match line_shape {
+                            gymnarium_visualisers_base::LineShape::Square => piston_window::line::Shape::Square,
+                            gymnarium_visualisers_base::LineShape::Round => piston_window::line::Shape::Round,
+                            gymnarium_visualisers_base::LineShape::Bevel => piston_window::line::Shape::Bevel,
+                        })
                         .draw_from_to(
                             [points[index].x, points[index].y],
                             [points[index + 1].x, points[index + 1].y],
@@ -294,11 +302,16 @@ impl PistonVisualiser {
                     )
                 );
             },
-            Geometry2D::Square { center_position, edge_length, fill_color, border_color, border_width, transformations } => {
+            Geometry2D::Square { center_position, edge_length, fill_color, border_color, border_width, corner_shape, transformations } => {
                 piston_window::rectangle::Rectangle::new(fill_color.float_array())
                     .border(piston_window::rectangle::Border {
                         color: border_color.float_array(),
                         radius: *border_width
+                    })
+                    .shape(match corner_shape {
+                        gymnarium_visualisers_base::CornerShape::Square => piston_window::rectangle::Shape::Square,
+                        gymnarium_visualisers_base::CornerShape::Round(size, resolution) => piston_window::rectangle::Shape::Round(*size, *resolution),
+                        gymnarium_visualisers_base::CornerShape::Bevel(size) => piston_window::rectangle::Shape::Bevel(*size),
                     })
                     .draw(
                         [
@@ -316,12 +329,17 @@ impl PistonVisualiser {
             },
             Geometry2D::Rectangle {
                 center_position, size, fill_color, border_color,
-                border_width, transformations
+                border_width, corner_shape, transformations
             } => {
                 piston_window::rectangle::Rectangle::new(fill_color.float_array())
                     .border(piston_window::rectangle::Border {
                         color: border_color.float_array(),
                         radius: *border_width
+                    })
+                    .shape(match corner_shape {
+                        gymnarium_visualisers_base::CornerShape::Square => piston_window::rectangle::Shape::Square,
+                        gymnarium_visualisers_base::CornerShape::Round(size, resolution) => piston_window::rectangle::Shape::Round(*size, *resolution),
+                        gymnarium_visualisers_base::CornerShape::Bevel(size) => piston_window::rectangle::Shape::Bevel(*size),
                     })
                     .draw(
                         [
