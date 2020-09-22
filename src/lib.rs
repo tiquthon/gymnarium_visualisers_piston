@@ -14,6 +14,7 @@ extern crate gfx_device_gl;
 extern crate gymnarium_visualisers_base;
 extern crate piston_window;
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::Display;
 use std::sync::atomic::AtomicBool;
@@ -21,13 +22,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
-use piston_window::{Context, DrawState, Event, G2d, Loop, PistonWindow, Window, WindowSettings};
-
 use gfx_device_gl::Device;
 
+use piston_window::{Context, DrawState, Event, G2d, Loop, PistonWindow, Window, WindowSettings};
+
+use gymnarium_visualisers_base::input::{
+    Button, ButtonArgs, ButtonState, CloseArgs, ControllerAxisArgs, ControllerButton,
+    ControllerHat, FileDrag, HatState, Input, Key, Motion, MouseButton, ResizeArgs, Touch,
+    TouchArgs,
+};
 use gymnarium_visualisers_base::{
-    Color, Geometry2D, Position2D, Size2D, Transformation2D, TwoDimensionalDrawableEnvironment,
-    TwoDimensionalVisualiser, Viewport2D, Viewport2DModification, Visualiser,
+    Color, Geometry2D, InputProvider, Position2D, Size2D, Transformation2D,
+    TwoDimensionalDrawableEnvironment, TwoDimensionalVisualiser, Viewport2D,
+    Viewport2DModification, Visualiser,
 };
 
 /* --- --- --- PistonVisualiserError --- --- --- */
@@ -74,6 +81,62 @@ impl<DrawableEnvironmentError: Error> From<DrawableEnvironmentError>
     }
 }
 
+/* --- --- --- PistonVisualiserInputProvider --- --- --- */
+
+#[derive(Default)]
+pub struct PistonVisualiserInputProvider {
+    input_queue: Arc<Mutex<VecDeque<Input>>>,
+}
+
+impl PistonVisualiserInputProvider {
+    fn push_back(&mut self, input: Input) {
+        self.input_queue
+            .lock()
+            .expect("Could not unwrap input_queue in PistonVisualiserInputProvider!")
+            .push_back(input);
+    }
+}
+
+impl InputProvider for PistonVisualiserInputProvider {
+    fn clear(&mut self) {
+        self.input_queue
+            .lock()
+            .expect("Could not unwrap input_queue in PistonVisualiserInputProvider!")
+            .clear();
+    }
+
+    fn peek(&self) -> Option<Input> {
+        self.input_queue
+            .lock()
+            .expect("Could not unwrap input_queue in PistonVisualiserInputProvider!")
+            .front()
+            .cloned()
+    }
+
+    fn pop(&mut self) -> Option<Input> {
+        self.input_queue
+            .lock()
+            .expect("Could not unwrap input_queue in PistonVisualiserInputProvider!")
+            .pop_front()
+    }
+
+    fn pop_all(&mut self) -> Vec<Input> {
+        self.input_queue
+            .lock()
+            .expect("Could not unwrap input_queue in PistonVisualiserInputProvider!")
+            .drain(..)
+            .collect()
+    }
+}
+
+impl Clone for PistonVisualiserInputProvider {
+    fn clone(&self) -> Self {
+        Self {
+            input_queue: Arc::clone(&self.input_queue),
+        }
+    }
+}
+
 /* --- --- --- PistonVisualiser --- --- --- */
 
 type PistonVisualiserSyncedData = (
@@ -86,6 +149,8 @@ pub struct PistonVisualiser {
     join_handle: Option<JoinHandle<()>>,
     close_requested: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
+
+    input_provider: PistonVisualiserInputProvider,
 
     last_geometries_2d: Vec<Geometry2D>,
     last_preferred_view: Option<(Viewport2D, Viewport2DModification)>,
@@ -105,6 +170,9 @@ impl PistonVisualiser {
         let arc1_latest_data = Arc::new(Mutex::new(Some((Vec::new(), None, None))));
         let arc2_latest_data = Arc::clone(&arc1_latest_data);
 
+        let input_provider_a = PistonVisualiserInputProvider::default();
+        let input_provider_b = input_provider_a.clone();
+
         Self {
             join_handle: Some(thread::spawn(move || {
                 Self::thread_function(
@@ -113,15 +181,21 @@ impl PistonVisualiser {
                     arc1_close_requested,
                     arc1_closed,
                     arc1_latest_data,
+                    input_provider_a,
                 )
             })),
             close_requested: arc2_close_requested,
             closed: arc2_closed,
+            input_provider: input_provider_b,
             last_geometries_2d: Vec::new(),
             last_preferred_view: None,
             last_preferred_background_color: None,
             latest_data: arc2_latest_data,
         }
+    }
+
+    pub fn input_provider(&self) -> PistonVisualiserInputProvider {
+        self.input_provider.clone()
     }
 
     fn thread_function(
@@ -130,6 +204,7 @@ impl PistonVisualiser {
         close_requested: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         latest_data: Arc<Mutex<Option<PistonVisualiserSyncedData>>>,
+        input_provider: PistonVisualiserInputProvider,
     ) {
         let mut window: PistonWindow = WindowSettings::new(window_title.as_str(), window_dimension)
             .exit_on_esc(true)
@@ -141,6 +216,8 @@ impl PistonVisualiser {
             .expect("Could not lock latest_data!")
             .take()
             .unwrap_or_default();
+
+        let mut input_provider = input_provider;
 
         while let Some(event) = window.next() {
             match event {
@@ -158,8 +235,8 @@ impl PistonVisualiser {
                         });
                     }
                 }
-                Event::Input(_input_args, _) => {
-                    // TODO: convert and give back somehow
+                Event::Input(input_args, _) => {
+                    input_provider.push_back(Self::map_piston_input_to(&input_args));
                 }
                 _ => {}
             }
@@ -177,6 +254,336 @@ impl PistonVisualiser {
             }
         }
         closed.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn map_piston_input_to(piston_input: &piston_window::Input) -> Input {
+        match piston_input {
+            piston_window::Input::Button(button_args) => Input::Button(ButtonArgs {
+                state: match button_args.state {
+                    piston_window::ButtonState::Press => ButtonState::Press,
+                    piston_window::ButtonState::Release => ButtonState::Release,
+                },
+                button: match button_args.button {
+                    piston_window::Button::Keyboard(key) => Button::Keyboard(match key {
+                        piston_window::Key::Unknown => Key::Unknown,
+                        piston_window::Key::Backspace => Key::Backspace,
+                        piston_window::Key::Tab => Key::Tab,
+                        piston_window::Key::Return => Key::Return,
+                        piston_window::Key::Escape => Key::Escape,
+                        piston_window::Key::Space => Key::Space,
+                        piston_window::Key::Exclaim => Key::Exclaim,
+                        piston_window::Key::Quotedbl => Key::Quotedbl,
+                        piston_window::Key::Hash => Key::Hash,
+                        piston_window::Key::Dollar => Key::Dollar,
+                        piston_window::Key::Percent => Key::Percent,
+                        piston_window::Key::Ampersand => Key::Ampersand,
+                        piston_window::Key::Quote => Key::Quote,
+                        piston_window::Key::LeftParen => Key::LeftParen,
+                        piston_window::Key::RightParen => Key::RightParen,
+                        piston_window::Key::Asterisk => Key::Asterisk,
+                        piston_window::Key::Plus => Key::Plus,
+                        piston_window::Key::Comma => Key::Comma,
+                        piston_window::Key::Minus => Key::Minus,
+                        piston_window::Key::Period => Key::Period,
+                        piston_window::Key::Slash => Key::Slash,
+                        piston_window::Key::D0 => Key::D0,
+                        piston_window::Key::D1 => Key::D1,
+                        piston_window::Key::D2 => Key::D2,
+                        piston_window::Key::D3 => Key::D3,
+                        piston_window::Key::D4 => Key::D4,
+                        piston_window::Key::D5 => Key::D5,
+                        piston_window::Key::D6 => Key::D6,
+                        piston_window::Key::D7 => Key::D7,
+                        piston_window::Key::D8 => Key::D8,
+                        piston_window::Key::D9 => Key::D9,
+                        piston_window::Key::Colon => Key::Colon,
+                        piston_window::Key::Semicolon => Key::Semicolon,
+                        piston_window::Key::Less => Key::Less,
+                        piston_window::Key::Equals => Key::Equals,
+                        piston_window::Key::Greater => Key::Greater,
+                        piston_window::Key::Question => Key::Question,
+                        piston_window::Key::At => Key::At,
+                        piston_window::Key::LeftBracket => Key::LeftBracket,
+                        piston_window::Key::Backslash => Key::Backslash,
+                        piston_window::Key::RightBracket => Key::RightBracket,
+                        piston_window::Key::Caret => Key::Caret,
+                        piston_window::Key::Underscore => Key::Underscore,
+                        piston_window::Key::Backquote => Key::Backquote,
+                        piston_window::Key::A => Key::A,
+                        piston_window::Key::B => Key::B,
+                        piston_window::Key::C => Key::C,
+                        piston_window::Key::D => Key::D,
+                        piston_window::Key::E => Key::E,
+                        piston_window::Key::F => Key::F,
+                        piston_window::Key::G => Key::G,
+                        piston_window::Key::H => Key::H,
+                        piston_window::Key::I => Key::I,
+                        piston_window::Key::J => Key::J,
+                        piston_window::Key::K => Key::K,
+                        piston_window::Key::L => Key::L,
+                        piston_window::Key::M => Key::M,
+                        piston_window::Key::N => Key::N,
+                        piston_window::Key::O => Key::O,
+                        piston_window::Key::P => Key::P,
+                        piston_window::Key::Q => Key::Q,
+                        piston_window::Key::R => Key::R,
+                        piston_window::Key::S => Key::S,
+                        piston_window::Key::T => Key::T,
+                        piston_window::Key::U => Key::U,
+                        piston_window::Key::V => Key::V,
+                        piston_window::Key::W => Key::W,
+                        piston_window::Key::X => Key::X,
+                        piston_window::Key::Y => Key::Y,
+                        piston_window::Key::Z => Key::Z,
+                        piston_window::Key::Delete => Key::Delete,
+                        piston_window::Key::CapsLock => Key::CapsLock,
+                        piston_window::Key::F1 => Key::F1,
+                        piston_window::Key::F2 => Key::F2,
+                        piston_window::Key::F3 => Key::F3,
+                        piston_window::Key::F4 => Key::F4,
+                        piston_window::Key::F5 => Key::F5,
+                        piston_window::Key::F6 => Key::F6,
+                        piston_window::Key::F7 => Key::F7,
+                        piston_window::Key::F8 => Key::F8,
+                        piston_window::Key::F9 => Key::F9,
+                        piston_window::Key::F10 => Key::F10,
+                        piston_window::Key::F11 => Key::F11,
+                        piston_window::Key::F12 => Key::F12,
+                        piston_window::Key::PrintScreen => Key::PrintScreen,
+                        piston_window::Key::ScrollLock => Key::ScrollLock,
+                        piston_window::Key::Pause => Key::Pause,
+                        piston_window::Key::Insert => Key::Insert,
+                        piston_window::Key::Home => Key::Home,
+                        piston_window::Key::PageUp => Key::PageUp,
+                        piston_window::Key::End => Key::End,
+                        piston_window::Key::PageDown => Key::PageDown,
+                        piston_window::Key::Right => Key::Right,
+                        piston_window::Key::Left => Key::Left,
+                        piston_window::Key::Down => Key::Down,
+                        piston_window::Key::Up => Key::Up,
+                        piston_window::Key::NumLockClear => Key::NumLockClear,
+                        piston_window::Key::NumPadDivide => Key::NumPadDivide,
+                        piston_window::Key::NumPadMultiply => Key::NumPadMultiply,
+                        piston_window::Key::NumPadMinus => Key::NumPadMinus,
+                        piston_window::Key::NumPadPlus => Key::NumPadPlus,
+                        piston_window::Key::NumPadEnter => Key::NumPadEnter,
+                        piston_window::Key::NumPad1 => Key::NumPad1,
+                        piston_window::Key::NumPad2 => Key::NumPad2,
+                        piston_window::Key::NumPad3 => Key::NumPad3,
+                        piston_window::Key::NumPad4 => Key::NumPad4,
+                        piston_window::Key::NumPad5 => Key::NumPad5,
+                        piston_window::Key::NumPad6 => Key::NumPad6,
+                        piston_window::Key::NumPad7 => Key::NumPad7,
+                        piston_window::Key::NumPad8 => Key::NumPad8,
+                        piston_window::Key::NumPad9 => Key::NumPad9,
+                        piston_window::Key::NumPad0 => Key::NumPad0,
+                        piston_window::Key::NumPadPeriod => Key::NumPadPeriod,
+                        piston_window::Key::Application => Key::Application,
+                        piston_window::Key::Power => Key::Power,
+                        piston_window::Key::NumPadEquals => Key::NumPadEquals,
+                        piston_window::Key::F13 => Key::F13,
+                        piston_window::Key::F14 => Key::F14,
+                        piston_window::Key::F15 => Key::F15,
+                        piston_window::Key::F16 => Key::F16,
+                        piston_window::Key::F17 => Key::F17,
+                        piston_window::Key::F18 => Key::F18,
+                        piston_window::Key::F19 => Key::F19,
+                        piston_window::Key::F20 => Key::F20,
+                        piston_window::Key::F21 => Key::F21,
+                        piston_window::Key::F22 => Key::F22,
+                        piston_window::Key::F23 => Key::F23,
+                        piston_window::Key::F24 => Key::F24,
+                        piston_window::Key::Execute => Key::Execute,
+                        piston_window::Key::Help => Key::Help,
+                        piston_window::Key::Menu => Key::Menu,
+                        piston_window::Key::Select => Key::Select,
+                        piston_window::Key::Stop => Key::Stop,
+                        piston_window::Key::Again => Key::Again,
+                        piston_window::Key::Undo => Key::Undo,
+                        piston_window::Key::Cut => Key::Cut,
+                        piston_window::Key::Copy => Key::Copy,
+                        piston_window::Key::Paste => Key::Paste,
+                        piston_window::Key::Find => Key::Find,
+                        piston_window::Key::Mute => Key::Mute,
+                        piston_window::Key::VolumeUp => Key::VolumeUp,
+                        piston_window::Key::VolumeDown => Key::VolumeDown,
+                        piston_window::Key::NumPadComma => Key::NumPadComma,
+                        piston_window::Key::NumPadEqualsAS400 => Key::NumPadEqualsAS400,
+                        piston_window::Key::AltErase => Key::AltErase,
+                        piston_window::Key::Sysreq => Key::Sysreq,
+                        piston_window::Key::Cancel => Key::Cancel,
+                        piston_window::Key::Clear => Key::Clear,
+                        piston_window::Key::Prior => Key::Prior,
+                        piston_window::Key::Return2 => Key::Return2,
+                        piston_window::Key::Separator => Key::Separator,
+                        piston_window::Key::Out => Key::Out,
+                        piston_window::Key::Oper => Key::Oper,
+                        piston_window::Key::ClearAgain => Key::ClearAgain,
+                        piston_window::Key::CrSel => Key::CrSel,
+                        piston_window::Key::ExSel => Key::ExSel,
+                        piston_window::Key::NumPad00 => Key::NumPad00,
+                        piston_window::Key::NumPad000 => Key::NumPad000,
+                        piston_window::Key::ThousandsSeparator => Key::ThousandsSeparator,
+                        piston_window::Key::DecimalSeparator => Key::DecimalSeparator,
+                        piston_window::Key::CurrencyUnit => Key::CurrencyUnit,
+                        piston_window::Key::CurrencySubUnit => Key::CurrencySubUnit,
+                        piston_window::Key::NumPadLeftParen => Key::NumPadLeftParen,
+                        piston_window::Key::NumPadRightParen => Key::NumPadRightParen,
+                        piston_window::Key::NumPadLeftBrace => Key::NumPadLeftBrace,
+                        piston_window::Key::NumPadRightBrace => Key::NumPadRightBrace,
+                        piston_window::Key::NumPadTab => Key::NumPadTab,
+                        piston_window::Key::NumPadBackspace => Key::NumPadBackspace,
+                        piston_window::Key::NumPadA => Key::NumPadA,
+                        piston_window::Key::NumPadB => Key::NumPadB,
+                        piston_window::Key::NumPadC => Key::NumPadC,
+                        piston_window::Key::NumPadD => Key::NumPadD,
+                        piston_window::Key::NumPadE => Key::NumPadE,
+                        piston_window::Key::NumPadF => Key::NumPadF,
+                        piston_window::Key::NumPadXor => Key::NumPadXor,
+                        piston_window::Key::NumPadPower => Key::NumPadPower,
+                        piston_window::Key::NumPadPercent => Key::NumPadPercent,
+                        piston_window::Key::NumPadLess => Key::NumPadLess,
+                        piston_window::Key::NumPadGreater => Key::NumPadGreater,
+                        piston_window::Key::NumPadAmpersand => Key::NumPadAmpersand,
+                        piston_window::Key::NumPadDblAmpersand => Key::NumPadDblAmpersand,
+                        piston_window::Key::NumPadVerticalBar => Key::NumPadVerticalBar,
+                        piston_window::Key::NumPadDblVerticalBar => Key::NumPadDblVerticalBar,
+                        piston_window::Key::NumPadColon => Key::NumPadColon,
+                        piston_window::Key::NumPadHash => Key::NumPadHash,
+                        piston_window::Key::NumPadSpace => Key::NumPadSpace,
+                        piston_window::Key::NumPadAt => Key::NumPadAt,
+                        piston_window::Key::NumPadExclam => Key::NumPadExclam,
+                        piston_window::Key::NumPadMemStore => Key::NumPadMemStore,
+                        piston_window::Key::NumPadMemRecall => Key::NumPadMemRecall,
+                        piston_window::Key::NumPadMemClear => Key::NumPadMemClear,
+                        piston_window::Key::NumPadMemAdd => Key::NumPadMemAdd,
+                        piston_window::Key::NumPadMemSubtract => Key::NumPadMemSubtract,
+                        piston_window::Key::NumPadMemMultiply => Key::NumPadMemMultiply,
+                        piston_window::Key::NumPadMemDivide => Key::NumPadMemDivide,
+                        piston_window::Key::NumPadPlusMinus => Key::NumPadPlusMinus,
+                        piston_window::Key::NumPadClear => Key::NumPadClear,
+                        piston_window::Key::NumPadClearEntry => Key::NumPadClearEntry,
+                        piston_window::Key::NumPadBinary => Key::NumPadBinary,
+                        piston_window::Key::NumPadOctal => Key::NumPadOctal,
+                        piston_window::Key::NumPadDecimal => Key::NumPadDecimal,
+                        piston_window::Key::NumPadHexadecimal => Key::NumPadHexadecimal,
+                        piston_window::Key::LCtrl => Key::LCtrl,
+                        piston_window::Key::LShift => Key::LShift,
+                        piston_window::Key::LAlt => Key::LAlt,
+                        piston_window::Key::LGui => Key::LGui,
+                        piston_window::Key::RCtrl => Key::RCtrl,
+                        piston_window::Key::RShift => Key::RShift,
+                        piston_window::Key::RAlt => Key::RAlt,
+                        piston_window::Key::RGui => Key::RGui,
+                        piston_window::Key::Mode => Key::Mode,
+                        piston_window::Key::AudioNext => Key::AudioNext,
+                        piston_window::Key::AudioPrev => Key::AudioPrev,
+                        piston_window::Key::AudioStop => Key::AudioStop,
+                        piston_window::Key::AudioPlay => Key::AudioPlay,
+                        piston_window::Key::AudioMute => Key::AudioMute,
+                        piston_window::Key::MediaSelect => Key::MediaSelect,
+                        piston_window::Key::Www => Key::Www,
+                        piston_window::Key::Mail => Key::Mail,
+                        piston_window::Key::Calculator => Key::Calculator,
+                        piston_window::Key::Computer => Key::Computer,
+                        piston_window::Key::AcSearch => Key::AcSearch,
+                        piston_window::Key::AcHome => Key::AcHome,
+                        piston_window::Key::AcBack => Key::AcBack,
+                        piston_window::Key::AcForward => Key::AcForward,
+                        piston_window::Key::AcStop => Key::AcStop,
+                        piston_window::Key::AcRefresh => Key::AcRefresh,
+                        piston_window::Key::AcBookmarks => Key::AcBookmarks,
+                        piston_window::Key::BrightnessDown => Key::BrightnessDown,
+                        piston_window::Key::BrightnessUp => Key::BrightnessUp,
+                        piston_window::Key::DisplaySwitch => Key::DisplaySwitch,
+                        piston_window::Key::KbdIllumToggle => Key::KbdIllumToggle,
+                        piston_window::Key::KbdIllumDown => Key::KbdIllumDown,
+                        piston_window::Key::KbdIllumUp => Key::KbdIllumUp,
+                        piston_window::Key::Eject => Key::Eject,
+                        piston_window::Key::Sleep => Key::Sleep,
+                    }),
+                    piston_window::Button::Mouse(mouse_button) => {
+                        Button::Mouse(match mouse_button {
+                            piston_window::MouseButton::Unknown => MouseButton::Unknown,
+                            piston_window::MouseButton::Left => MouseButton::Left,
+                            piston_window::MouseButton::Right => MouseButton::Right,
+                            piston_window::MouseButton::Middle => MouseButton::Middle,
+                            piston_window::MouseButton::X1 => MouseButton::X1,
+                            piston_window::MouseButton::X2 => MouseButton::X2,
+                            piston_window::MouseButton::Button6 => MouseButton::Button6,
+                            piston_window::MouseButton::Button7 => MouseButton::Button7,
+                            piston_window::MouseButton::Button8 => MouseButton::Button8,
+                        })
+                    }
+                    piston_window::Button::Controller(controller_button) => {
+                        Button::Controller(ControllerButton {
+                            id: controller_button.id,
+                            button: controller_button.button,
+                        })
+                    }
+                    piston_window::Button::Hat(controller_hat) => Button::Hat(ControllerHat {
+                        id: controller_hat.id,
+                        state: match controller_hat.state {
+                            piston_window::HatState::Centered => HatState::Centered,
+                            piston_window::HatState::Up => HatState::Up,
+                            piston_window::HatState::Right => HatState::Right,
+                            piston_window::HatState::Down => HatState::Down,
+                            piston_window::HatState::Left => HatState::Left,
+                            piston_window::HatState::RightUp => HatState::RightUp,
+                            piston_window::HatState::RightDown => HatState::RightDown,
+                            piston_window::HatState::LeftUp => HatState::LeftUp,
+                            piston_window::HatState::LeftDown => HatState::LeftDown,
+                        },
+                        which: controller_hat.which,
+                    }),
+                },
+                scancode: button_args.scancode,
+            }),
+            piston_window::Input::Move(motion) => Input::Move(match motion {
+                piston_window::Motion::MouseCursor(mouse_cursor) => {
+                    Motion::MouseCursor(*mouse_cursor)
+                }
+                piston_window::Motion::MouseRelative(mouse_relative) => {
+                    Motion::MouseRelative(*mouse_relative)
+                }
+                piston_window::Motion::MouseScroll(mouse_scroll) => {
+                    Motion::MouseScroll(*mouse_scroll)
+                }
+                piston_window::Motion::ControllerAxis(controller_axis) => {
+                    Motion::ControllerAxis(ControllerAxisArgs {
+                        id: controller_axis.id,
+                        axis: controller_axis.axis,
+                        position: controller_axis.position,
+                    })
+                }
+                piston_window::Motion::Touch(touch) => Motion::Touch(TouchArgs {
+                    device: touch.device,
+                    id: touch.id,
+                    position_3d: touch.position_3d,
+                    pressure_3d: touch.pressure_3d,
+                    is_3d: touch.is_3d,
+                    touch: match touch.touch {
+                        piston_window::Touch::Start => Touch::Start,
+                        piston_window::Touch::Move => Touch::Move,
+                        piston_window::Touch::End => Touch::End,
+                        piston_window::Touch::Cancel => Touch::Cancel,
+                    },
+                }),
+            }),
+            piston_window::Input::Text(string) => Input::Text(string.clone()),
+            piston_window::Input::Resize(resize_args) => Input::Resize(ResizeArgs {
+                window_size: resize_args.window_size,
+                draw_size: resize_args.draw_size,
+            }),
+            piston_window::Input::Focus(focus) => Input::Focus(*focus),
+            piston_window::Input::Cursor(cursor) => Input::Cursor(*cursor),
+            piston_window::Input::FileDrag(file_drag) => Input::FileDrag(match file_drag {
+                piston_window::FileDrag::Hover(hover) => FileDrag::Hover(hover.clone()),
+                piston_window::FileDrag::Drop(drop) => FileDrag::Drop(drop.clone()),
+                piston_window::FileDrag::Cancel => FileDrag::Cancel,
+            }),
+            piston_window::Input::Close(_) => Input::Close(CloseArgs {}),
+        }
     }
 
     fn render(
