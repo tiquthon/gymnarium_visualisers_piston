@@ -12,6 +12,8 @@ edition = "2018"
 license = "MIT"
 
 [dependencies]
+gymnarium_base = { path = "../gymnarium_base" }
 gymnarium_visualisers_base = { path = "../gymnarium_visualisers_base" }
 piston_window = "0.112.0"
 gfx_device_gl = "0.16.2"
+image = "0.23.10"

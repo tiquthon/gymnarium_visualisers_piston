@@ -12,29 +12,35 @@
 
 extern crate gfx_device_gl;
 extern crate gymnarium_visualisers_base;
+extern crate image;
 extern crate piston_window;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt::Display;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::thread::JoinHandle;
 
 use gfx_device_gl::Device;
 
-use piston_window::{Context, DrawState, Event, G2d, Loop, PistonWindow, Window, WindowSettings};
+use image::ImageBuffer;
 
+use piston_window::{
+    Context, DrawState, Event, Flip, G2d, G2dTexture, Image, Loop, PistonWindow, Texture,
+    TextureSettings, Window, WindowSettings,
+};
+
+use gymnarium_base::math::{matrix_3x3_as_matrix_3x2, Position2D, Size2D, Transformation2D};
 use gymnarium_visualisers_base::input::{
     Button, ButtonArgs, ButtonState, CloseArgs, ControllerAxisArgs, ControllerButton,
     ControllerHat, FileDrag, HatState, Input, Key, Motion, MouseButton, ResizeArgs, Touch,
     TouchArgs,
 };
 use gymnarium_visualisers_base::{
-    Color, Geometry2D, InputProvider, Position2D, Size2D, Transformation2D,
-    TwoDimensionalDrawableEnvironment, TwoDimensionalVisualiser, Viewport2D,
-    Viewport2DModification, Visualiser,
+    Color, Geometry2D, InputProvider, TextureSource, TwoDimensionalDrawableEnvironment,
+    TwoDimensionalVisualiser, Viewport2D, Viewport2DModification, Visualiser,
 };
 
 /* --- --- --- PistonVisualiserError --- --- --- */
@@ -137,6 +143,86 @@ impl Clone for PistonVisualiserInputProvider {
     }
 }
 
+/* --- --- --- TextureBuffer --- --- --- */
+
+struct TextureBuffer {
+    starting_uses: usize,
+    buffered_textures: HashMap<TextureSource, (usize, G2dTexture)>,
+}
+
+impl TextureBuffer {
+    pub fn new(starting_uses: usize) -> Self {
+        Self {
+            starting_uses: starting_uses.max(1),
+            buffered_textures: HashMap::default(),
+        }
+    }
+
+    pub fn decrease_and_drop(&mut self) {
+        self.buffered_textures
+            .iter_mut()
+            .for_each(|(_, (counter, _))| {
+                if *counter > 0 {
+                    (*counter) -= 1;
+                }
+            });
+        let m = self
+            .buffered_textures
+            .iter()
+            .filter(|(_, (counter, _))| *counter == 0)
+            .map(|(texture_source, _)| texture_source.clone())
+            .collect::<Vec<TextureSource>>();
+        m.iter().for_each(|texture_source| {
+            let _ = self.buffered_textures.remove(texture_source);
+        });
+    }
+
+    pub fn load_or_mark_use(&mut self, texture_source: TextureSource, window: &mut PistonWindow) {
+        if self.buffered_textures.contains_key(&texture_source) {
+            let (counter, _) = self.buffered_textures.get_mut(&texture_source).unwrap();
+            (*counter) += 1;
+        } else {
+            let loaded = match &texture_source {
+                TextureSource::Path(path) => Texture::from_path(
+                    &mut window.create_texture_context(),
+                    path,
+                    Flip::None,
+                    &TextureSettings::new(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("Could not load {} as texture (cause: {})", path, error)
+                }),
+                TextureSource::Bytes {
+                    data,
+                    width,
+                    height,
+                } => Texture::from_image(
+                    &mut window.create_texture_context(),
+                    &ImageBuffer::from_vec(*width, *height, data.clone()).unwrap(),
+                    &TextureSettings::new(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Could not load texture from bytes with size {}x{} (cause: {})",
+                        width, height, error
+                    )
+                }),
+            };
+            let _ = self
+                .buffered_textures
+                .insert(texture_source, (self.starting_uses, loaded));
+        }
+    }
+
+    pub fn get(&self, texture_source: &TextureSource) -> Option<&G2dTexture> {
+        if let Some((_, texture)) = self.buffered_textures.get(texture_source) {
+            Some(texture)
+        } else {
+            None
+        }
+    }
+}
+
 /* --- --- --- PistonVisualiser --- --- --- */
 
 type PistonVisualiserSyncedData = (
@@ -148,7 +234,7 @@ type PistonVisualiserSyncedData = (
 pub struct PistonVisualiser {
     join_handle: Option<JoinHandle<()>>,
     close_requested: Arc<AtomicBool>,
-    closed: Arc<AtomicBool>,
+    closed: Weak<AtomicBool>,
 
     input_provider: PistonVisualiserInputProvider,
 
@@ -165,7 +251,7 @@ impl PistonVisualiser {
         let arc2_close_requested = Arc::clone(&arc1_close_requested);
 
         let arc1_closed = Arc::new(AtomicBool::new(false));
-        let arc2_closed = Arc::clone(&arc1_closed);
+        let arc2_closed = Arc::downgrade(&arc1_closed);
 
         let arc1_latest_data = Arc::new(Mutex::new(Some((Vec::new(), None, None))));
         let arc2_latest_data = Arc::clone(&arc1_latest_data);
@@ -198,6 +284,18 @@ impl PistonVisualiser {
         self.input_provider.clone()
     }
 
+    fn update_texture_buffer(
+        texture_buffer: &mut TextureBuffer,
+        geometry_2ds: &[Geometry2D],
+        window: &mut PistonWindow,
+    ) {
+        geometry_2ds.iter().for_each(|geometry| {
+            if let Geometry2D::Image { texture_source, .. } = geometry {
+                texture_buffer.load_or_mark_use(texture_source.clone(), window);
+            }
+        });
+    }
+
     fn thread_function(
         window_title: String,
         window_dimension: (u32, u32),
@@ -219,10 +317,17 @@ impl PistonVisualiser {
 
         let mut input_provider = input_provider;
 
+        let mut texture_buffer = TextureBuffer::new(180);
+
         while let Some(event) = window.next() {
             match event {
                 Event::Loop(loop_args) => {
                     if let Loop::Render(_) = loop_args {
+                        Self::update_texture_buffer(
+                            &mut texture_buffer,
+                            &geometry_2ds,
+                            &mut window,
+                        );
                         window.draw_2d(&event, |context, graphics, device| {
                             Self::render(
                                 &context,
@@ -231,8 +336,10 @@ impl PistonVisualiser {
                                 &geometry_2ds,
                                 &preferred_view,
                                 &background_color,
+                                &texture_buffer,
                             );
                         });
+                        texture_buffer.decrease_and_drop();
                     }
                 }
                 Event::Input(input_args, _) => {
@@ -593,6 +700,7 @@ impl PistonVisualiser {
         geometry_2ds: &[Geometry2D],
         preferred_view: &Option<(Viewport2D, Viewport2DModification)>,
         background_color: &Option<Color>,
+        texture_buffer: &TextureBuffer,
     ) {
         if let Some(c) = background_color {
             piston_window::clear(c.float_array(), graphics);
@@ -663,6 +771,7 @@ impl PistonVisualiser {
                 device,
                 &draw_state,
                 &geometry_2d.clone().append_transformation(transform.clone()),
+                texture_buffer,
             );
         }
     }
@@ -673,6 +782,7 @@ impl PistonVisualiser {
         device: &mut Device,
         draw_state: &DrawState,
         geometry_2d: &Geometry2D,
+        texture_buffer: &TextureBuffer,
     ) {
         match geometry_2d {
             Geometry2D::Point {
@@ -717,9 +827,7 @@ impl PistonVisualiser {
                         [points[0].x, points[0].y],
                         [points[1].x, points[1].y],
                         draw_state,
-                        gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                            transformations.transformation_matrix(),
-                        ),
+                        matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                         graphics,
                     );
             }
@@ -747,9 +855,7 @@ impl PistonVisualiser {
                             [points[index].x, points[index].y],
                             [points[index + 1].x, points[index + 1].y],
                             draw_state,
-                            gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                                transformations.transformation_matrix(),
-                            ),
+                            matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                             graphics,
                         );
                 }
@@ -769,9 +875,7 @@ impl PistonVisualiser {
                 piston_window::polygon::Polygon::new(fill_color.float_array()).draw(
                     &polygon,
                     draw_state,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                     graphics,
                 );
                 Self::draw_polygon_border(
@@ -780,9 +884,7 @@ impl PistonVisualiser {
                     *border_width,
                     draw_state,
                     graphics,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                 );
             }
             Geometry2D::Square {
@@ -817,9 +919,7 @@ impl PistonVisualiser {
                         *edge_length,
                     ],
                     draw_state,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                     graphics,
                 ),
             Geometry2D::Rectangle {
@@ -854,9 +954,7 @@ impl PistonVisualiser {
                         size.height,
                     ],
                     draw_state,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                     graphics,
                 ),
             Geometry2D::Polygon {
@@ -874,9 +972,7 @@ impl PistonVisualiser {
                 piston_window::polygon::Polygon::new(fill_color.float_array()).draw(
                     &polygon,
                     draw_state,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                     graphics,
                 );
                 Self::draw_polygon_border(
@@ -885,9 +981,7 @@ impl PistonVisualiser {
                     *border_width,
                     draw_state,
                     graphics,
-                    gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                        transformations.transformation_matrix(),
-                    ),
+                    matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                 );
             }
             Geometry2D::Circle {
@@ -911,9 +1005,7 @@ impl PistonVisualiser {
                             2f64 * radius,
                         ],
                         draw_state,
-                        gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                            transformations.transformation_matrix(),
-                        ),
+                        matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                         graphics,
                     );
             }
@@ -938,15 +1030,55 @@ impl PistonVisualiser {
                             size.height,
                         ],
                         draw_state,
-                        gymnarium_visualisers_base::matrix_3x3_as_matrix_3x2(
-                            transformations.transformation_matrix(),
-                        ),
+                        matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
+                        graphics,
+                    );
+            }
+            Geometry2D::Image {
+                center_position,
+                size,
+                texture_source,
+                source_rectangle,
+                fill_color,
+                transformations,
+            } => {
+                Image::new()
+                    .rect([
+                        center_position.x - size.width / 2f64,
+                        center_position.y - size.height / 2f64,
+                        size.width,
+                        size.height,
+                    ])
+                    .maybe_color(match fill_color {
+                        Some(fc) => Some(fc.float_array()),
+                        None => None,
+                    })
+                    .maybe_src_rect(match source_rectangle {
+                        Some((src_pos, src_siz)) => Some([
+                            src_pos.x - src_siz.width / 2f64,
+                            src_pos.y - src_siz.height / 2f64,
+                            src_siz.width,
+                            src_siz.height,
+                        ]),
+                        None => None,
+                    })
+                    .draw(
+                        texture_buffer.get(texture_source).unwrap(),
+                        draw_state,
+                        matrix_3x3_as_matrix_3x2(transformations.transformation_matrix()),
                         graphics,
                     );
             }
             Geometry2D::Group(geometries) => {
                 for geometry in geometries {
-                    Self::render_geometry_2d(context, graphics, device, draw_state, geometry);
+                    Self::render_geometry_2d(
+                        context,
+                        graphics,
+                        device,
+                        draw_state,
+                        geometry,
+                        texture_buffer,
+                    );
                 }
             }
         }
@@ -986,7 +1118,10 @@ impl PistonVisualiser {
 
 impl Visualiser<PistonVisualiserError> for PistonVisualiser {
     fn is_open(&self) -> bool {
-        !self.closed.load(std::sync::atomic::Ordering::Relaxed)
+        match self.closed.upgrade() {
+            Some(is_closed) => !is_closed.load(std::sync::atomic::Ordering::Relaxed),
+            None => false,
+        }
     }
 
     fn close(&mut self) -> Result<(), PistonVisualiserError> {
