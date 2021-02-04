@@ -27,10 +27,7 @@ use gfx_device_gl::Device;
 
 use image::ImageBuffer;
 
-use piston_window::{
-    Context, DrawState, Event, Flip, G2d, G2dTexture, Image, Loop, PistonWindow, Texture,
-    TextureSettings, Window, WindowSettings,
-};
+use piston_window::{Context, DrawState, Event, Flip, G2d, G2dTexture, Image, Loop, PistonWindow, Texture, TextureSettings, Window, WindowSettings, EventLoop};
 
 use gymnarium_base::math::{matrix_3x3_as_matrix_3x2, Position2D, Size2D, Transformation2D};
 use gymnarium_visualisers_base::input::{
@@ -246,7 +243,7 @@ pub struct PistonVisualiser {
 }
 
 impl PistonVisualiser {
-    pub fn run(window_title: String, window_dimension: (u32, u32)) -> Self {
+    pub fn run(window_title: String, window_dimension: (u32, u32), max_frames_per_second: Option<u64>) -> Self {
         let arc1_close_requested = Arc::new(AtomicBool::new(false));
         let arc2_close_requested = Arc::clone(&arc1_close_requested);
 
@@ -264,6 +261,7 @@ impl PistonVisualiser {
                 Self::thread_function(
                     window_title,
                     window_dimension,
+                    max_frames_per_second,
                     arc1_close_requested,
                     arc1_closed,
                     arc1_latest_data,
@@ -299,6 +297,7 @@ impl PistonVisualiser {
     fn thread_function(
         window_title: String,
         window_dimension: (u32, u32),
+        max_frames_per_second: Option<u64>,
         close_requested: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         latest_data: Arc<Mutex<Option<PistonVisualiserSyncedData>>>,
@@ -308,6 +307,10 @@ impl PistonVisualiser {
             .exit_on_esc(true)
             .build()
             .expect("Failed to build PistonWindow!");
+        window.set_ups(0);
+        if let Some(some_max_frames_per_second) = max_frames_per_second {
+            window.set_max_fps(some_max_frames_per_second);
+        }
 
         let (mut geometry_2ds, mut preferred_view, mut background_color) = latest_data
             .lock()
@@ -321,26 +324,24 @@ impl PistonVisualiser {
 
         while let Some(event) = window.next() {
             match event {
-                Event::Loop(loop_args) => {
-                    if let Loop::Render(_) = loop_args {
-                        Self::update_texture_buffer(
-                            &mut texture_buffer,
+                Event::Loop(Loop::Render(_)) => {
+                    Self::update_texture_buffer(
+                        &mut texture_buffer,
+                        &geometry_2ds,
+                        &mut window,
+                    );
+                    window.draw_2d(&event, |context, graphics, device| {
+                        Self::render(
+                            &context,
+                            graphics,
+                            device,
                             &geometry_2ds,
-                            &mut window,
+                            &preferred_view,
+                            &background_color,
+                            &texture_buffer,
                         );
-                        window.draw_2d(&event, |context, graphics, device| {
-                            Self::render(
-                                &context,
-                                graphics,
-                                device,
-                                &geometry_2ds,
-                                &preferred_view,
-                                &background_color,
-                                &texture_buffer,
-                            );
-                        });
-                        texture_buffer.decrease_and_drop();
-                    }
+                    });
+                    texture_buffer.decrease_and_drop();
                 }
                 Event::Input(input_args, _) => {
                     input_provider.push_back(Self::map_piston_input_to(&input_args));
