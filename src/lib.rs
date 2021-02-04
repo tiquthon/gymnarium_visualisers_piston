@@ -27,7 +27,10 @@ use gfx_device_gl::Device;
 
 use image::ImageBuffer;
 
-use piston_window::{Context, DrawState, Event, Flip, G2d, G2dTexture, Image, Loop, PistonWindow, Texture, TextureSettings, Window, WindowSettings, EventLoop};
+use piston_window::{
+    Context, DrawState, Event, EventLoop, Flip, G2d, G2dTexture, Image, Loop, PistonWindow,
+    Texture, TextureSettings, Window, WindowSettings,
+};
 
 use gymnarium_base::math::{matrix_3x3_as_matrix_3x2, Position2D, Size2D, Transformation2D};
 use gymnarium_visualisers_base::input::{
@@ -243,7 +246,11 @@ pub struct PistonVisualiser {
 }
 
 impl PistonVisualiser {
-    pub fn run(window_title: String, window_dimension: (u32, u32), max_frames_per_second: Option<u64>) -> Self {
+    pub fn run(
+        window_title: String,
+        window_dimension: (u32, u32),
+        max_frames_per_second: Option<u64>,
+    ) -> Self {
         let arc1_close_requested = Arc::new(AtomicBool::new(false));
         let arc2_close_requested = Arc::clone(&arc1_close_requested);
 
@@ -325,11 +332,7 @@ impl PistonVisualiser {
         while let Some(event) = window.next() {
             match event {
                 Event::Loop(Loop::Render(_)) => {
-                    Self::update_texture_buffer(
-                        &mut texture_buffer,
-                        &geometry_2ds,
-                        &mut window,
-                    );
+                    Self::update_texture_buffer(&mut texture_buffer, &geometry_2ds, &mut window);
                     window.draw_2d(&event, |context, graphics, device| {
                         Self::render(
                             &context,
