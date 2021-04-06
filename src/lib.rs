@@ -1053,19 +1053,15 @@ impl PistonVisualiser {
                         size.width,
                         size.height,
                     ])
-                    .maybe_color(match fill_color {
-                        Some(fc) => Some(fc.float_array()),
-                        None => None,
-                    })
-                    .maybe_src_rect(match source_rectangle {
-                        Some((src_pos, src_siz)) => Some([
+                    .maybe_color(fill_color.map(|fc| fc.float_array()))
+                    .maybe_src_rect(source_rectangle.map(|(src_pos, src_siz)| {
+                        [
                             src_pos.x - src_siz.width / 2f64,
                             src_pos.y - src_siz.height / 2f64,
                             src_siz.width,
                             src_siz.height,
-                        ]),
-                        None => None,
-                    })
+                        ]
+                    }))
                     .draw(
                         texture_buffer.get(texture_source).unwrap(),
                         draw_state,
